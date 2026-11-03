@@ -81,12 +81,15 @@ export async function prepareTestRun(
   if (options.configPath && !existsSync(configPath!))
     throw new Error(`Midscene config does not exist: ${configPath}`);
   const definition = await loadTestProject<unknown>(configPath);
+  // 单文件模式下 projectRoot 是该 YAML 所在目录，产物不该散落到用例目录里，
+  // 否则入库脚本和报告看板都找不到；此时以命令执行目录为输出基准。
+  const outputBase = input.singleFile ? input.cwd : input.projectRoot;
   const resultDir = options.resultDir
     ? resolve(input.cwd, options.resultDir)
-    : join(input.projectRoot, '.midscene', 'test-results');
+    : join(outputBase, '.midscene', 'test-results');
   const runDir = join(resultDir, runId);
   const summaryPath = join(runDir, 'summary.json');
-  const reportDir = resolve(input.projectRoot, definition.output.reportDir);
+  const reportDir = resolve(outputBase, definition.output.reportDir);
   mkdirSync(resultDir, { recursive: true });
   mkdirSync(runDir);
   const projects: PreparedExecutionProject[] = [];
