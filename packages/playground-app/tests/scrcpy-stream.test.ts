@@ -1,0 +1,552 @@
+import { describe, expect, rs, test } from '@rstest/core';
+import type { ScrcpyMediaStreamPacket } from '@yume-chan/scrcpy';
+import { createScrcpyVideoStream } from '../src/scrcpy-stream';
+
+interface RawVideoPayload {
+  type?: string;
+  data: ArrayBuffer | ArrayBufferView;
+  keyFrame?: boolean;
+}
+
+type VideoDataHandler = (
+  data: RawVideoPayload,
+  acknowledge?: () => void,
+) => void;
+type VoidHandler = () => void;
+type ErrorHandler = (error: Error) => void;
+
+class MockScrcpySocket {
+  private videoDataHandlers = new Set<VideoDataHandler>();
+  private disconnectHandlers = new Set<VoidHandler>();
+  private errorHandlers = new Set<ErrorHandler>();
+  readonly subscribedEvents: string[] = [];
+
+  on(event: 'video-data', handler: VideoDataHandler): void;
+  on(event: 'disconnect', handler: VoidHandler): void;
+  on(event: 'error', handler: ErrorHandler): void;
+  on(
+    event: 'video-data' | 'disconnect' | 'error',
+    handler: VideoDataHandler | VoidHandler | ErrorHandler,
+  ): void {
+    this.subscribedEvents.push(event);
+    if (event === 'video-data') {
+      this.videoDataHandlers.add(handler as VideoDataHandler);
+      return;
+    }
+
+    if (event === 'disconnect') {
+      this.disconnectHandlers.add(handler as VoidHandler);
+      return;
+    }
+
+    this.errorHandlers.add(handler as ErrorHandler);
+  }
+
+  off(event: 'video-data', handler: VideoDataHandler): void;
+  off(event: 'disconnect', handler: VoidHandler): void;
+  off(event: 'error', handler: ErrorHandler): void;
+  off(
+    event: 'video-data' | 'disconnect' | 'error',
+    handler: VideoDataHandler | VoidHandler | ErrorHandler,
+  ): void {
+    if (event === 'video-data') {
+      this.videoDataHandlers.delete(handler as VideoDataHandler);
+      return;
+    }
+
+    if (event === 'disconnect') {
+      this.disconnectHandlers.delete(handler as VoidHandler);
+      return;
+    }
+
+    this.errorHandlers.delete(handler as ErrorHandler);
+  }
+
+  dispatchVideoData(packet: RawVideoPayload, acknowledge?: () => void) {
+    this.videoDataHandlers.forEach((handler) => handler(packet, acknowledge));
+  }
+
+  dispatchDisconnect() {
+    this.disconnectHandlers.forEach((handler) => handler());
+  }
+}
+
+async function collectStream(
+  stream: ReadableStream<ScrcpyMediaStreamPacket>,
+): Promise<ScrcpyMediaStreamPacket[]> {
+  const packets: ScrcpyMediaStreamPacket[] = [];
+  await stream.pipeTo(
+    new WritableStream<ScrcpyMediaStreamPacket>({
+      write(packet) {
+        packets.push(packet);
+      },
+    }),
+  );
+  return packets;
+}
+
+describe('createScrcpyVideoStream', () => {
+  test('acknowledges receipt even when the decoder is stalled or drops a GOP', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const acknowledge = rs.fn();
+    socket.dispatchVideoData(
+      { type: 'configuration', data: new Uint8Array([99]) },
+      acknowledge,
+    );
+    for (let index = 0; index < 20; index++) {
+      socket.dispatchVideoData(
+        { type: 'data', data: new Uint8Array([index]), keyFrame: index === 0 },
+        acknowledge,
+      );
+    }
+    expect(acknowledge).toHaveBeenCalledTimes(21);
+    await stream.cancel();
+  });
+
+  test('acknowledges malformed packets while surfacing the stream error', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const acknowledge = rs.fn();
+    const collected = collectStream(stream);
+    socket.dispatchVideoData(
+      { type: 'data', data: new Uint8Array([1]) },
+      acknowledge,
+    );
+    await expect(collected).rejects.toThrow('missing keyFrame metadata');
+    expect(acknowledge).toHaveBeenCalledTimes(1);
+  });
+
+  test('subscribes to scrcpy socket events immediately', () => {
+    const socket = new MockScrcpySocket();
+
+    createScrcpyVideoStream(socket);
+
+    expect(socket.subscribedEvents).toEqual([
+      'video-data',
+      'disconnect',
+      'error',
+    ]);
+  });
+
+  test('buffers frame data until configuration arrives', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const collected = collectStream(stream);
+
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([1, 2, 3]),
+      keyFrame: true,
+    });
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([9]),
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([4, 5, 6]),
+      keyFrame: false,
+    });
+    socket.dispatchDisconnect();
+
+    const packets = await collected;
+
+    expect(
+      packets.map((packet) => ({
+        type: packet.type,
+        data: Array.from(packet.data),
+      })),
+    ).toEqual([
+      { type: 'configuration', data: [9] },
+      { type: 'data', data: [1, 2, 3] },
+      { type: 'data', data: [4, 5, 6] },
+    ]);
+  });
+
+  test('reports first usable data only after configuration is available', async () => {
+    const socket = new MockScrcpySocket();
+    const onFirstDataPacket = rs.fn();
+    const stream = createScrcpyVideoStream(socket, { onFirstDataPacket });
+    const collected = collectStream(stream);
+
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([1]),
+      keyFrame: true,
+    });
+    expect(onFirstDataPacket).not.toHaveBeenCalled();
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([9]),
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([2]),
+      keyFrame: false,
+    });
+    socket.dispatchDisconnect();
+    await collected;
+
+    expect(onFirstDataPacket).toHaveBeenCalledTimes(1);
+  });
+
+  test('bounds the pre-configuration buffer while the decoder initializes', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const collected = collectStream(stream);
+
+    for (let index = 0; index < 10; index += 1) {
+      socket.dispatchVideoData({
+        type: 'data',
+        data: new Uint8Array([index]),
+        keyFrame: index === 8,
+      });
+    }
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([9]),
+    });
+    socket.dispatchDisconnect();
+
+    const packets = await collected;
+    expect(packets).toHaveLength(3);
+    expect(packets[0].type).toBe('configuration');
+    expect(
+      packets
+        .filter((packet) => packet.type === 'data')
+        .map((packet) => packet.data[0]),
+    ).toEqual([8, 9]);
+  });
+
+  test('drops post-configuration deltas until a keyframe arrives', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const collected = collectStream(stream);
+
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([9]),
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([1]),
+      keyFrame: false,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([2]),
+      keyFrame: true,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([3]),
+      keyFrame: false,
+    });
+    socket.dispatchDisconnect();
+
+    const packets = await collected;
+    expect(
+      packets.map((packet) => ({
+        type: packet.type,
+        data: Array.from(packet.data),
+      })),
+    ).toEqual([
+      { type: 'configuration', data: [9] },
+      { type: 'data', data: [2] },
+      { type: 'data', data: [3] },
+    ]);
+  });
+
+  test('drops the rest of a GOP after backpressure and resumes at a keyframe', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([9]),
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([0]),
+      keyFrame: true,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([1]),
+      keyFrame: false,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([2]),
+      keyFrame: false,
+    });
+
+    // The queue is now full. Once one delta is dropped, every remaining
+    // packet in that GOP must be dropped as well.
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([3]),
+      keyFrame: false,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([4]),
+      keyFrame: false,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([10]),
+      keyFrame: true,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([11]),
+      keyFrame: false,
+    });
+
+    const reader = stream.getReader();
+    const packets: ScrcpyMediaStreamPacket[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const result = await reader.read();
+      expect(result.done).toBe(false);
+      if (result.done) {
+        throw new Error(
+          'Scrcpy stream ended before the original queue drained',
+        );
+      }
+      packets.push(result.value);
+    }
+
+    // Frame 11 was dropped after retaining keyframe 10. Draining the queue
+    // must not make frame 12 safe: its prediction chain is still broken.
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([12]),
+      keyFrame: false,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([20]),
+      keyFrame: true,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([21]),
+      keyFrame: false,
+    });
+    socket.dispatchDisconnect();
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      packets.push(result.value);
+    }
+
+    expect(
+      packets.map((packet) => ({
+        type: packet.type,
+        data: packet.data[0],
+      })),
+    ).toEqual([
+      { type: 'configuration', data: 9 },
+      { type: 'data', data: 0 },
+      { type: 'data', data: 1 },
+      { type: 'data', data: 2 },
+      { type: 'data', data: 20 },
+      { type: 'data', data: 21 },
+    ]);
+  });
+
+  test.each([[10], [10, 20], [10, 11, 20]])(
+    'resumes from the latest intact retained keyframe after %j',
+    async (...recoveryFrames: number[]) => {
+      const socket = new MockScrcpySocket();
+      const stream = createScrcpyVideoStream(socket);
+      socket.dispatchVideoData({
+        type: 'configuration',
+        data: new Uint8Array([99]),
+      });
+      for (const index of [0, 1, 2, ...recoveryFrames]) {
+        socket.dispatchVideoData({
+          type: 'data',
+          data: new Uint8Array([index]),
+          keyFrame: index % 10 === 0,
+        });
+      }
+
+      const reader = stream.getReader();
+      const packets: ScrcpyMediaStreamPacket[] = [];
+      for (let index = 0; index < 4; index += 1) {
+        const result = await reader.read();
+        if (result.done)
+          throw new Error('Stream ended before the queue drained');
+        packets.push(result.value);
+      }
+      const lastKeyframe = recoveryFrames[recoveryFrames.length - 1];
+      socket.dispatchVideoData({
+        type: 'data',
+        data: new Uint8Array([lastKeyframe + 1]),
+        keyFrame: false,
+      });
+      socket.dispatchDisconnect();
+      while (true) {
+        const result = await reader.read();
+        if (result.done) break;
+        packets.push(result.value);
+      }
+      expect(packets.map((packet) => packet.data[0])).toEqual([
+        99,
+        0,
+        1,
+        2,
+        lastKeyframe,
+        lastKeyframe + 1,
+      ]);
+    },
+  );
+
+  test('discards an overflowing pre-configuration GOP and waits for a new keyframe', async () => {
+    const socket = new MockScrcpySocket();
+    const onFirstDataPacket = rs.fn();
+    const stream = createScrcpyVideoStream(socket, { onFirstDataPacket });
+    for (let index = 0; index < 4; index += 1) {
+      socket.dispatchVideoData({
+        type: 'data',
+        data: new Uint8Array([index]),
+        keyFrame: index === 0,
+      });
+    }
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([99]),
+    });
+    // Drain configuration and any incorrectly retained initial frames before
+    // sending the next delta, so queue pressure cannot hide the broken GOP.
+    const packets: ScrcpyMediaStreamPacket[] = [];
+    const collected = stream.pipeTo(
+      new WritableStream<ScrcpyMediaStreamPacket>({
+        write(packet) {
+          packets.push(packet);
+        },
+      }),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const reportedBeforeRecovery = onFirstDataPacket.mock.calls.length;
+    for (const index of [4, 10, 11]) {
+      socket.dispatchVideoData({
+        type: 'data',
+        data: new Uint8Array([index]),
+        keyFrame: index === 10,
+      });
+    }
+    socket.dispatchDisconnect();
+    await collected;
+
+    expect(packets.map((packet) => packet.data[0])).toEqual([99, 10, 11]);
+    expect(reportedBeforeRecovery).toBe(0);
+    expect(onFirstDataPacket).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects data packets without keyframe metadata', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const collected = collectStream(stream);
+
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([9]),
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([1]),
+    });
+
+    await expect(collected).rejects.toThrow(
+      'Scrcpy video data packet is missing keyFrame metadata',
+    );
+  });
+
+  test('propagates keyFrame flag from raw packet as keyframe', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const collected = collectStream(stream);
+
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([0]),
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([1]),
+      keyFrame: true,
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([2]),
+      keyFrame: false,
+    });
+    socket.dispatchDisconnect();
+
+    const packets = await collected;
+    const dataPackets = packets.filter(
+      (packet): packet is Extract<ScrcpyMediaStreamPacket, { type: 'data' }> =>
+        packet.type === 'data',
+    );
+
+    expect(dataPackets).toHaveLength(2);
+    expect(dataPackets[0].keyframe).toBe(true);
+    expect(dataPackets[1].keyframe).toBe(false);
+  });
+
+  test('accepts ArrayBufferView and ArrayBuffer payloads from binary transport', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const collected = collectStream(stream);
+
+    const sourceBytes = new Uint8Array([99, 10, 20, 30, 88]);
+    const configBytes = new DataView(sourceBytes.buffer, 1, 3);
+    const dataBuffer = new Uint8Array([40, 50, 60]).buffer;
+
+    socket.dispatchVideoData({ type: 'configuration', data: configBytes });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: dataBuffer,
+      keyFrame: true,
+    });
+    socket.dispatchDisconnect();
+
+    const packets = await collected;
+
+    expect(packets).toHaveLength(2);
+    expect(packets[0].type).toBe('configuration');
+    expect(Array.from(packets[0].data)).toEqual([10, 20, 30]);
+    expect(packets[1].type).toBe('data');
+    expect(Array.from(packets[1].data)).toEqual([40, 50, 60]);
+  });
+
+  test('does not populate pts (no device timestamp available from socket)', async () => {
+    const socket = new MockScrcpySocket();
+    const stream = createScrcpyVideoStream(socket);
+    const collected = collectStream(stream);
+
+    socket.dispatchVideoData({
+      type: 'configuration',
+      data: new Uint8Array([0]),
+    });
+    socket.dispatchVideoData({
+      type: 'data',
+      data: new Uint8Array([1]),
+      keyFrame: true,
+    });
+    socket.dispatchDisconnect();
+
+    const packets = await collected;
+    const dataPackets = packets.filter(
+      (packet): packet is Extract<ScrcpyMediaStreamPacket, { type: 'data' }> =>
+        packet.type === 'data',
+    );
+
+    expect(dataPackets).toHaveLength(1);
+    expect(dataPackets[0].pts).toBeUndefined();
+  });
+});

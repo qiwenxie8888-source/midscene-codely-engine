@@ -1,0 +1,402 @@
+import {
+  CaretDownFilled,
+  CaretUpFilled,
+  WarningFilled,
+} from '@ant-design/icons';
+import { Button, Empty, Tooltip } from 'antd';
+import { useId, useMemo, useState } from 'react';
+import { RunnerAttemptTimeline } from './attempt-timeline';
+import { ErrorCards } from './error-card';
+import {
+  type ReportIssue,
+  type ReportIssues,
+  getProjectIssues,
+} from './issues';
+import {
+  type RunnerBreakdownSort,
+  type RunnerBreakdownSortDirection,
+  type RunnerCaseStatus,
+  type RunnerCaseView,
+  type RunnerProjectBreakdownView,
+  type RunnerProjectView,
+  type RunnerVisualIndex,
+  getAllAttemptVisualFrames,
+  getCaseFailure,
+  positionAttemptVisualFrames,
+} from './model';
+import {
+  CaseStatus,
+  type RunnerCaseDisplayMode,
+  caseStatusLabel,
+  formatDuration,
+} from './view-primitives';
+
+function ProjectSortButton({
+  label,
+  value,
+  sort,
+  direction,
+  onChange,
+}: {
+  label: string;
+  value: RunnerBreakdownSort;
+  sort: RunnerBreakdownSort;
+  direction: RunnerBreakdownSortDirection;
+  onChange(value: RunnerBreakdownSort): void;
+}): JSX.Element {
+  const active = sort === value;
+  return (
+    <span className="runner-project-tree-column">
+      <button
+        type="button"
+        className={`runner-project-sort-button${active ? ' is-active' : ''}`}
+        aria-label={`Sort by ${label}${
+          active
+            ? `, currently ${direction === 'asc' ? 'ascending' : 'descending'}`
+            : ''
+        }`}
+        aria-pressed={active}
+        onClick={() => onChange(value)}
+      >
+        <span>{label}</span>
+        <span className="runner-project-sort-icon" aria-hidden="true">
+          <CaretUpFilled
+            className={active && direction === 'asc' ? 'is-active' : ''}
+          />
+          <CaretDownFilled
+            className={active && direction === 'desc' ? 'is-active' : ''}
+          />
+        </span>
+      </button>
+    </span>
+  );
+}
+
+export const projectDisplayStatus = (
+  item: RunnerProjectView,
+): RunnerCaseStatus => {
+  if (item.project.status === 'failed' || item.failedCount > 0) return 'failed';
+  if (item.retryPassedCount > 0) return 'retry-passed';
+  if (!item.cases.length || item.notRunCount > 0) return 'not-run';
+  return 'passed';
+};
+
+function ProjectBreakdownCase({
+  visualIndex,
+  item,
+  displayMode,
+  onOpen,
+}: {
+  visualIndex: RunnerVisualIndex;
+  item: RunnerCaseView;
+  displayMode: RunnerCaseDisplayMode;
+  onOpen(item: RunnerCaseView, stepId?: string): void;
+}): JSX.Element {
+  const [previewFrameKey, setPreviewFrameKey] = useState<string>();
+  const failure = getCaseFailure(item.testCase);
+  const attemptCount = item.testCase.attempts.length;
+  const positionedFrames = useMemo(() => {
+    if (!item.finalAttempt) return [];
+    return positionAttemptVisualFrames(
+      item.finalAttempt,
+      getAllAttemptVisualFrames(item.finalAttempt, visualIndex),
+    );
+  }, [item.finalAttempt, visualIndex]);
+  const issue = failure
+    ? {
+        label: `Step ${failure.node}`,
+        detail: `${failure.node}: ${failure.error?.message || 'Step failed'}`,
+      }
+    : item.status === 'not-run'
+      ? {
+          label: item.testCase.notRunReason || 'Not run',
+          detail: item.testCase.notRunReason || 'This case did not run',
+        }
+      : undefined;
+  return (
+    <li
+      className={`runner-project-tree-case-item${
+        displayMode === 'detailed' ? ' is-detailed' : ''
+      }`}
+      data-case-key={item.key}
+    >
+      <div className="runner-project-tree-case">
+        <button
+          type="button"
+          className="runner-project-tree-case-open"
+          onClick={() => onOpen(item, failure?.id)}
+          aria-label={`Open ${item.testCase.name} in project ${item.project.name}${
+            failure ? ' at the failed Step' : ''
+          } · ${caseStatusLabel(item.status)}`}
+        >
+          <div className="runner-project-tree-case-main">
+            <div className="runner-project-tree-case-title">
+              <CaseStatus status={item.status} quiet />
+              <Tooltip title={item.testCase.name} mouseEnterDelay={0.25}>
+                <h3>{item.testCase.name}</h3>
+              </Tooltip>
+            </div>
+            <div className="runner-project-tree-case-meta-row">
+              <Tooltip title={item.document.sourcePath} mouseEnterDelay={0.25}>
+                <span>{item.document.sourcePath}</span>
+              </Tooltip>
+              <span>
+                {attemptCount} {attemptCount === 1 ? 'attempt' : 'attempts'}
+              </span>
+              <time>{formatDuration(item.durationMs)}</time>
+            </div>
+            <div
+              className={`runner-project-tree-case-issue${issue ? '' : ' is-empty'}`}
+            >
+              {issue ? (
+                <Tooltip title={issue.detail} mouseEnterDelay={0.25}>
+                  <span>
+                    <WarningFilled />
+                    {issue.label}
+                  </span>
+                </Tooltip>
+              ) : null}
+            </div>
+          </div>
+        </button>
+        {displayMode === 'detailed' ? (
+          <div className="runner-case-evidence-preview">
+            <RunnerAttemptTimeline
+              attempt={item.finalAttempt}
+              frames={positionedFrames}
+              previewFrameKey={previewFrameKey}
+              variant="overview"
+              onPreview={setPreviewFrameKey}
+              onSelectFrame={(frame) => onOpen(item, frame.stepId)}
+            />
+          </div>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+function ProjectBreakdownNode({
+  visualIndex,
+  view,
+  expanded,
+  caseDisplayMode,
+  issues,
+  onToggle,
+  onOpenCase,
+}: {
+  visualIndex: RunnerVisualIndex;
+  view: RunnerProjectBreakdownView;
+  expanded: boolean;
+  caseDisplayMode: RunnerCaseDisplayMode;
+  issues: ReportIssue[];
+  onToggle(): void;
+  onOpenCase(item: RunnerCaseView, stepId?: string): void;
+}): JSX.Element {
+  const childGroupId = useId();
+  const { cases, item } = view;
+  const attention =
+    [
+      item.failedCount && `${item.failedCount} failed`,
+      item.retryPassedCount && `${item.retryPassedCount} retried`,
+      item.notRunCount && `${item.notRunCount} not run`,
+      issues.length &&
+        `${issues.length} project ${issues.length === 1 ? 'issue' : 'issues'}`,
+    ]
+      .filter(Boolean)
+      .join(' · ') || '-';
+
+  return (
+    <li className={`runner-project-tree-node${expanded ? ' is-expanded' : ''}`}>
+      <button
+        type="button"
+        className="runner-project-tree-root"
+        onClick={onToggle}
+        aria-controls={childGroupId}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? 'Collapse' : 'Expand'} project ${
+          item.project.name
+        }`}
+      >
+        <span className="runner-project-tree-toggle">
+          <span
+            className={`runner-project-tree-chevron${expanded ? ' is-expanded' : ''}`}
+            aria-hidden="true"
+          />
+          <span className="runner-project-tree-identity">
+            <CaseStatus status={projectDisplayStatus(item)} quiet />
+            <Tooltip title={item.project.name} mouseEnterDelay={0.25}>
+              <span className="runner-project-tree-name">
+                {item.project.name}
+              </span>
+            </Tooltip>
+            {item.project.platform ? (
+              <span className="runner-project-tree-meta">
+                {item.project.platform}
+              </span>
+            ) : null}
+          </span>
+        </span>
+        <span
+          className="runner-project-tree-stats"
+          aria-label={`${item.project.name} overview`}
+        >
+          <span>
+            <strong>{item.passedCount}</strong>
+            <span className="runner-project-tree-case-total">
+              {' '}
+              / {item.cases.length}
+            </span>
+          </span>
+          <Tooltip title={attention}>
+            <span className="runner-project-tree-attention">{attention}</span>
+          </Tooltip>
+          <span>
+            <strong>{formatDuration(item.durationMs)}</strong>
+          </span>
+        </span>
+      </button>
+      {expanded && issues.length > 0 ? (
+        <div className="runner-project-tree-issues">
+          <ErrorCards
+            issues={issues}
+            label={`Project ${item.project.name} issues`}
+          />
+        </div>
+      ) : null}
+      {expanded ? (
+        <ul
+          className={`runner-project-tree-children is-${caseDisplayMode}`}
+          id={childGroupId}
+        >
+          {cases.length ? (
+            cases.map((caseItem) => (
+              <ProjectBreakdownCase
+                visualIndex={visualIndex}
+                item={caseItem}
+                key={caseItem.key}
+                displayMode={caseDisplayMode}
+                onOpen={onOpenCase}
+              />
+            ))
+          ) : (
+            <li className="runner-project-tree-empty">
+              No cases were collected for this project
+            </li>
+          )}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+export function ProjectBreakdownTree({
+  visualIndex,
+  projects,
+  issues,
+  caseDisplayMode,
+  expandedProjectKeys,
+  sort,
+  sortDirection,
+  onSortChange,
+  onExpandedProjectKeysChange,
+  hasActiveFilters,
+  onResetFilters,
+  onOpenCase,
+}: {
+  visualIndex: RunnerVisualIndex;
+  projects: RunnerProjectBreakdownView[];
+  issues?: ReportIssues;
+  caseDisplayMode: RunnerCaseDisplayMode;
+  expandedProjectKeys: Set<string>;
+  sort: RunnerBreakdownSort;
+  sortDirection: RunnerBreakdownSortDirection;
+  onSortChange(value: RunnerBreakdownSort): void;
+  onExpandedProjectKeysChange(keys: Set<string>): void;
+  hasActiveFilters: boolean;
+  onResetFilters(): void;
+  onOpenCase(item: RunnerCaseView, stepId?: string): void;
+}): JSX.Element {
+  const toggleProject = (key: string) => {
+    const next = new Set(expandedProjectKeys);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    onExpandedProjectKeysChange(next);
+  };
+
+  if (!projects.length) {
+    return (
+      <div className="runner-empty-results">
+        <Empty
+          description={
+            hasActiveFilters
+              ? 'No projects or cases match these filters'
+              : 'No projects were collected for this run'
+          }
+        >
+          {hasActiveFilters ? (
+            <Button onClick={onResetFilters}>Clear filters</Button>
+          ) : null}
+        </Empty>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="runner-project-tree-header">
+        <ProjectSortButton
+          label="Project"
+          value="name"
+          sort={sort}
+          direction={sortDirection}
+          onChange={onSortChange}
+        />
+        <div className="runner-project-tree-columns">
+          <ProjectSortButton
+            label="Passed / Case"
+            value="passed-count"
+            sort={sort}
+            direction={sortDirection}
+            onChange={onSortChange}
+          />
+          <ProjectSortButton
+            label="Attention"
+            value="result"
+            sort={sort}
+            direction={sortDirection}
+            onChange={onSortChange}
+          />
+          <ProjectSortButton
+            label="Duration"
+            value="duration"
+            sort={sort}
+            direction={sortDirection}
+            onChange={onSortChange}
+          />
+        </div>
+      </div>
+      <ul
+        className="runner-project-tree"
+        aria-label="Project and case breakdown"
+      >
+        {projects.map((view) => (
+          <ProjectBreakdownNode
+            issues={
+              issues
+                ? getProjectIssues(issues, view.item.project.projectId)
+                : []
+            }
+            visualIndex={visualIndex}
+            view={view}
+            key={view.item.key}
+            expanded={expandedProjectKeys.has(view.item.key)}
+            caseDisplayMode={caseDisplayMode}
+            onToggle={() => toggleProject(view.item.key)}
+            onOpenCase={onOpenCase}
+          />
+        ))}
+      </ul>
+    </>
+  );
+}

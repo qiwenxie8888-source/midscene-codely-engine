@@ -1,0 +1,1391 @@
+import { existsSync, readFileSync } from 'node:fs';
+import {
+  CLIError,
+  parseCliArgs,
+  parseValue,
+  removePrefix,
+  reportCLIError,
+  runToolsCLI,
+} from '@/cli';
+import { describe, expect, it, rs } from '@rstest/core';
+import { z } from 'zod';
+
+describe('parseValue', () => {
+  it('parses JSON objects', () => {
+    expect(parseValue('{"prompt":"the login button"}')).toEqual({
+      prompt: 'the login button',
+    });
+  });
+
+  it('parses nested JSON objects', () => {
+    expect(parseValue('{"a":{"b":1}}')).toEqual({ a: { b: 1 } });
+  });
+
+  it('parses JSON arrays', () => {
+    expect(parseValue('[1,2,3]')).toEqual([1, 2, 3]);
+  });
+
+  it('returns string for invalid JSON starting with {', () => {
+    expect(parseValue('{not json}')).toBe('{not json}');
+  });
+
+  it('returns string for invalid JSON starting with [', () => {
+    expect(parseValue('[broken')).toBe('[broken');
+  });
+
+  it('parses positive integers', () => {
+    expect(parseValue('42')).toBe(42);
+  });
+
+  it('parses negative integers', () => {
+    expect(parseValue('-5')).toBe(-5);
+  });
+
+  it('parses decimals', () => {
+    expect(parseValue('3.14')).toBe(3.14);
+  });
+
+  it('parses negative decimals', () => {
+    expect(parseValue('-2.5')).toBe(-2.5);
+  });
+
+  it('parses zero', () => {
+    expect(parseValue('0')).toBe(0);
+  });
+
+  it('returns string for non-numeric text', () => {
+    expect(parseValue('hello')).toBe('hello');
+  });
+
+  it('returns string for partial numeric text', () => {
+    expect(parseValue('12abc')).toBe('12abc');
+  });
+
+  it('returns string for empty string', () => {
+    expect(parseValue('')).toBe('');
+  });
+
+  it('returns string for URL', () => {
+    expect(parseValue('https://example.com')).toBe('https://example.com');
+  });
+});
+
+describe('parseCliArgs', () => {
+  it('parses --key value pairs', () => {
+    expect(parseCliArgs(['--url', 'https://example.com'])).toEqual({
+      url: 'https://example.com',
+    });
+  });
+
+  it('parses --key=value format', () => {
+    expect(parseCliArgs(['--url=https://example.com'])).toEqual({
+      url: 'https://example.com',
+    });
+  });
+
+  it('preserves empty string values in both option formats', () => {
+    expect(parseCliArgs(['--content', ''])).toEqual({ content: '' });
+    expect(parseCliArgs(['--content='])).toEqual({ content: '' });
+  });
+
+  it('consumes empty string values before subsequent options', () => {
+    expect(parseCliArgs(['--content', '', '--verbose'])).toEqual({
+      content: '',
+      verbose: true,
+    });
+    expect(parseCliArgs(['--content', '', '--content', 'text'])).toEqual({
+      content: ['', 'text'],
+    });
+  });
+
+  it('preserves empty string values for string schema fields', () => {
+    const def = {
+      name: 'configure',
+      description: 'configure',
+      schema: { content: z.string() },
+      handler: rs.fn(),
+    };
+
+    expect(parseCliArgs(['--content', ''], def)).toEqual({ content: '' });
+  });
+
+  it('parses boolean flags', () => {
+    expect(parseCliArgs(['--verbose'])).toEqual({ verbose: true });
+  });
+
+  it('parses consecutive boolean flags', () => {
+    expect(parseCliArgs(['--verbose', '--debug'])).toEqual({
+      verbose: true,
+      debug: true,
+    });
+  });
+
+  it('parses JSON values', () => {
+    expect(parseCliArgs(['--locate', '{"prompt":"the login button"}'])).toEqual(
+      {
+        locate: { prompt: 'the login button' },
+      },
+    );
+  });
+
+  it('parses numeric values', () => {
+    expect(parseCliArgs(['--timeout', '30'])).toEqual({ timeout: 30 });
+  });
+
+  it('parses mixed arguments', () => {
+    expect(
+      parseCliArgs([
+        '--url',
+        'https://example.com',
+        '--timeout',
+        '30',
+        '--verbose',
+        '--locate',
+        '{"prompt":"button"}',
+      ]),
+    ).toEqual({
+      url: 'https://example.com',
+      timeout: 30,
+      verbose: true,
+      locate: { prompt: 'button' },
+    });
+  });
+
+  it('ignores non-dashed arguments', () => {
+    expect(parseCliArgs(['positional', '--key', 'value'])).toEqual({
+      key: 'value',
+    });
+  });
+
+  it('returns empty object for empty args', () => {
+    expect(parseCliArgs([])).toEqual({});
+  });
+
+  it('handles --key=value with JSON', () => {
+    expect(parseCliArgs(['--locate={"prompt":"btn"}'])).toEqual({
+      locate: { prompt: 'btn' },
+    });
+  });
+
+  it('handles --key=value with number', () => {
+    expect(parseCliArgs(['--timeout=30'])).toEqual({ timeout: 30 });
+  });
+
+  it('treats trailing flag as boolean', () => {
+    expect(parseCliArgs(['--key', 'value', '--flag'])).toEqual({
+      key: 'value',
+      flag: true,
+    });
+  });
+
+  it('handles direction-style string values', () => {
+    expect(parseCliArgs(['--direction', 'down'])).toEqual({
+      direction: 'down',
+    });
+  });
+
+  it('handles --content with spaces in value', () => {
+    expect(parseCliArgs(['--content', 'hello world'])).toEqual({
+      content: 'hello world',
+    });
+  });
+
+  it('preserves dotted keys as flat args', () => {
+    expect(
+      parseCliArgs([
+        '--android.deviceId',
+        '127.0.0.1:7555',
+        '--ios.wda-port',
+        '8100',
+      ]),
+    ).toEqual({
+      'android.deviceId': '127.0.0.1:7555',
+      'ios.wda-port': 8100,
+    });
+  });
+
+  it('treats namespace-like keys as independent flat args', () => {
+    expect(
+      parseCliArgs(['--android', 'foo', '--android.deviceId', 'bar']),
+    ).toEqual({
+      android: 'foo',
+      'android.deviceId': 'bar',
+    });
+  });
+
+  it('accumulates repeated flags into arrays', () => {
+    expect(
+      parseCliArgs([
+        '--image',
+        './a.png',
+        '--image',
+        './b.png',
+        '--image-name',
+        'a',
+        '--image-name',
+        'b',
+      ]),
+    ).toEqual({
+      image: ['./a.png', './b.png'],
+      'image-name': ['a', 'b'],
+    });
+  });
+
+  it('preserves dotted kebab-case keys as flat args', () => {
+    expect(parseCliArgs(['--android.device-id', '127.0.0.1:7555'])).toEqual({
+      'android.device-id': '127.0.0.1:7555',
+    });
+  });
+
+  it('preserves numeric-looking values for string-compatible fields', () => {
+    const refinement = rs.fn(() => true);
+    const def = {
+      name: 'connect',
+      description: 'connect',
+      schema: {
+        deviceId: z.string().refine(refinement),
+        mode: z.enum(['123', 'safe']),
+        literal: z.literal('007'),
+        stringOrNumber: z.union([z.string(), z.number()]),
+      },
+      cli: {
+        options: {
+          deviceId: {
+            preferredName: 'device-id',
+          },
+        },
+      },
+      handler: rs.fn(),
+    };
+
+    expect(
+      parseCliArgs(
+        [
+          '--device-id',
+          '0009007199254740993',
+          '--mode=123',
+          '--literal',
+          '007',
+          '--string-or-number',
+          '42',
+        ],
+        def,
+      ),
+    ).toEqual({
+      'device-id': '0009007199254740993',
+      mode: '123',
+      literal: '007',
+      'string-or-number': '42',
+    });
+    expect(refinement).not.toHaveBeenCalled();
+  });
+
+  it('decodes values according to non-string schema fields', () => {
+    const def = {
+      name: 'configure',
+      description: 'configure',
+      schema: {
+        timeout: z.number(),
+        enabled: z.boolean(),
+        attempts: z.literal(3),
+        payload: z.union([z.string(), z.object({ prompt: z.string() })]),
+      },
+      handler: rs.fn(),
+    };
+
+    expect(
+      parseCliArgs(
+        [
+          '--timeout=-2.5',
+          '--enabled=false',
+          '--attempts',
+          '3',
+          '--payload',
+          '{"prompt":"go"}',
+        ],
+        def,
+      ),
+    ).toEqual({
+      timeout: -2.5,
+      enabled: false,
+      attempts: 3,
+      payload: { prompt: 'go' },
+    });
+  });
+
+  it('preserves JSON-looking text and repeated numeric image names', () => {
+    const def = {
+      name: 'act',
+      description: 'act',
+      schema: {
+        prompt: z.string().optional().default(''),
+        imageName: z.union([z.string(), z.array(z.string())]),
+        payload: z.object({ prompt: z.string() }),
+      },
+      handler: rs.fn(),
+    };
+    expect(
+      parseCliArgs(
+        [
+          '--prompt={"account":"007"}',
+          '--image-name=007',
+          '--image-name=9007199254740993',
+          '--payload={"prompt":"go"}',
+        ],
+        def,
+      ),
+    ).toEqual({
+      prompt: '{"account":"007"}',
+      'image-name': ['007', '9007199254740993'],
+      payload: { prompt: 'go' },
+    });
+  });
+
+  it('retains invalid typed inputs for schema validation to reject', () => {
+    const def = {
+      name: 'configure',
+      description: 'configure',
+      schema: {
+        enabled: z.boolean(),
+        timeout: z.number(),
+        payload: z.object({ prompt: z.string() }),
+      },
+      handler: rs.fn(),
+    };
+    const parsed = parseCliArgs(
+      ['--enabled=maybe', '--timeout=slow', '--payload={broken'],
+      def,
+    );
+    expect(parsed).toEqual({
+      enabled: 'maybe',
+      timeout: 'slow',
+      payload: '{broken',
+    });
+    expect(z.object(def.schema).safeParse(parsed).success).toBe(false);
+  });
+
+  it('decodes native enum inputs using the same values as Zod', () => {
+    const def = {
+      name: 'configure',
+      description: 'configure',
+      schema: { mode: z.nativeEnum({ '007': 3 }) },
+      handler: rs.fn(),
+    };
+    const parsed = parseCliArgs(['--mode=3'], def);
+    expect(parsed).toEqual({ mode: 3 });
+    expect(z.object(def.schema).safeParse(parsed).success).toBe(true);
+  });
+
+  it('keeps numeric branches reachable beside restricted strings', () => {
+    const schema = {
+      mode: z.union([z.literal('auto'), z.number()]),
+      choice: z.union([z.enum(['auto', '007']), z.number()]),
+      native: z.nativeEnum({ 0: 'Zero', Zero: 0, Text: '007' }),
+    };
+    const def = { name: 'demo', description: 'demo', schema, handler: rs.fn() };
+    const parsed = parseCliArgs(['--mode=42', '--choice=3', '--native=0'], def);
+    expect(parsed).toEqual({ mode: 42, choice: 3, native: 0 });
+    expect(z.object(schema).safeParse(parsed).success).toBe(true);
+    expect(
+      parseCliArgs(['--mode=auto', '--choice=007', '--native=007'], def),
+    ).toEqual({ mode: 'auto', choice: '007', native: '007' });
+  });
+
+  it('recognizes Zod fields without relying on constructor identity', () => {
+    const stringField = z.string();
+    const foreignStringField = {
+      _def: stringField._def,
+      safeParse: stringField.safeParse.bind(stringField),
+    } as unknown as z.ZodTypeAny;
+    expect(foreignStringField).not.toBeInstanceOf(z.ZodString);
+
+    const def = {
+      name: 'connect',
+      description: 'connect',
+      schema: { deviceId: foreignStringField },
+      handler: rs.fn(),
+    };
+    expect(parseCliArgs(['--deviceId=320336557157'], def)).toEqual({
+      deviceId: '320336557157',
+    });
+  });
+
+  it('preserves raw text for unsupported concrete schemas', () => {
+    const schema = {
+      deviceId: z.intersection(z.string(), z.string()),
+    };
+    const def = {
+      name: 'connect',
+      description: 'connect',
+      schema,
+      handler: rs.fn(),
+    };
+    const parsed = parseCliArgs(['--deviceId=320336557157'], def);
+
+    expect(parsed).toEqual({ deviceId: '320336557157' });
+    expect(z.object(schema).safeParse(parsed).success).toBe(true);
+  });
+
+  it('decodes repeated collection values using their element schemas', () => {
+    const schema = {
+      values: z.array(z.number()).optional(),
+      pair: z.tuple([z.number(), z.string()]),
+      flags: z.array(z.boolean()),
+      names: z.array(z.string()),
+    };
+    const def = { name: 'demo', description: 'demo', schema, handler: rs.fn() };
+    const parsed = parseCliArgs(
+      [
+        '--values=1',
+        '--values=2',
+        '--pair=3',
+        '--pair=007',
+        '--flags=true',
+        '--flags=false',
+        '--names=007',
+        '--names=9007199254740993',
+      ],
+      def,
+    );
+    expect(parsed).toEqual({
+      values: [1, 2],
+      pair: [3, '007'],
+      flags: [true, false],
+      names: ['007', '9007199254740993'],
+    });
+    expect(z.object(schema).safeParse(parsed).success).toBe(true);
+    expect(parseCliArgs(['--values=[1,2]', '--pair=[3,"007"]'], def)).toEqual({
+      values: [1, 2],
+      pair: [3, '007'],
+    });
+  });
+
+  it('selects collection branches for repeated union inputs and tuple rest items', () => {
+    const schema = {
+      values: z.union([z.string(), z.array(z.number())]),
+      tuple: z.tuple([z.string()]).rest(z.number()),
+    };
+    const def = { name: 'demo', description: 'demo', schema, handler: rs.fn() };
+    const parsed = parseCliArgs(
+      ['--values=1', '--values=2', '--tuple=007', '--tuple=3', '--tuple=4'],
+      def,
+    );
+    expect(parsed).toEqual({ values: [1, 2], tuple: ['007', 3, 4] });
+    expect(z.object(schema).safeParse(parsed).success).toBe(true);
+    expect(parseCliArgs(['--values=007'], def)).toEqual({ values: '007' });
+    expect(parseCliArgs(['--tuple=["007",3]', '--tuple=4'], def)).toEqual({
+      tuple: ['007', 3, 4],
+    });
+  });
+
+  it('accumulates repeated flags into an array', () => {
+    expect(
+      parseCliArgs([
+        '--htmlReport',
+        'a.html',
+        '--htmlReport',
+        'b.html',
+        '--htmlReport',
+        'c.html',
+      ]),
+    ).toEqual({ htmlReport: ['a.html', 'b.html', 'c.html'] });
+  });
+
+  it('accumulates repeated --key=value into an array', () => {
+    expect(parseCliArgs(['--report=a.html', '--report=b.html'])).toEqual({
+      report: ['a.html', 'b.html'],
+    });
+  });
+});
+
+describe('removePrefix', () => {
+  it('removes matching prefix', () => {
+    expect(removePrefix('android_connect', 'android_')).toBe('connect');
+  });
+
+  it('returns name unchanged when prefix does not match', () => {
+    expect(removePrefix('Tap', 'android_')).toBe('Tap');
+  });
+
+  it('returns name unchanged when no prefix provided', () => {
+    expect(removePrefix('android_connect')).toBe('android_connect');
+  });
+
+  it('returns name unchanged when prefix is empty string', () => {
+    expect(removePrefix('connect', '')).toBe('connect');
+  });
+
+  it('handles take_screenshot without platform prefix', () => {
+    expect(removePrefix('take_screenshot', 'android_')).toBe('take_screenshot');
+  });
+});
+
+describe('CLIError', () => {
+  it('has default exitCode of 1', () => {
+    const error = new CLIError('test');
+    expect(error.message).toBe('test');
+    expect(error.exitCode).toBe(1);
+  });
+
+  it('accepts custom exitCode', () => {
+    const error = new CLIError('test', 2);
+    expect(error.exitCode).toBe(2);
+  });
+
+  it('is instanceof Error', () => {
+    expect(new CLIError('test')).toBeInstanceOf(Error);
+  });
+});
+
+describe('reportCLIError', () => {
+  it('prints CLIError messages and returns their exit code', () => {
+    const log = rs.fn();
+
+    expect(reportCLIError(new CLIError('bad args', 2), log)).toBe(2);
+    expect(log).toHaveBeenCalledWith('bad args');
+  });
+
+  it('prints non-CLI errors and returns exit code 1', () => {
+    const log = rs.fn();
+    const error = new Error('boom');
+
+    expect(reportCLIError(error, log)).toBe(1);
+    expect(log).toHaveBeenCalledWith(error);
+  });
+});
+
+describe('runToolsCLI', () => {
+  function createMockTools(
+    definitions: Array<{
+      name: string;
+      handler: (args: Record<string, unknown>) => Promise<unknown>;
+    }>,
+  ) {
+    return {
+      initTools: rs.fn().mockResolvedValue(undefined),
+      destroy: rs.fn().mockResolvedValue(undefined),
+      getToolDefinitions: rs.fn().mockReturnValue(
+        definitions.map((d) => ({
+          name: d.name,
+          description: `${d.name} command`,
+          schema: {},
+          handler: d.handler,
+        })),
+      ),
+    } as any;
+  }
+
+  it('prints help when no command given', async () => {
+    const tools = createMockTools([]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+    await runToolsCLI(tools, 'test-cli', { argv: [] });
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it('prints help for --help flag', async () => {
+    const tools = createMockTools([]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--help'],
+      version: '1.2.3',
+    });
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it('prints version for --version flag', async () => {
+    const tools = createMockTools([]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--version'],
+      version: '1.2.3',
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith('test-cli v1.2.3');
+    consoleSpy.mockRestore();
+  });
+
+  it('prints version for version command', async () => {
+    const tools = createMockTools([]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['version'],
+      version: '1.2.3',
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith('test-cli v1.2.3');
+    consoleSpy.mockRestore();
+  });
+
+  it('strips a global --deep-locate flag and applies deep locate defaults', async () => {
+    const handler = rs
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'tap', handler }]);
+    tools.setToolDefaults = rs.fn();
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    // The flag is placed before the command; it must be removed so 'tap'
+    // resolves as the command instead of being treated as unknown.
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--deep-locate', 'tap', '--locate', 'btn'],
+    });
+
+    expect(tools.setToolDefaults).toHaveBeenCalledWith({
+      locate: { deepLocate: true },
+      act: { deepLocate: true },
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it('strips --deep-locate even when it follows the command', async () => {
+    const handler = rs
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'tap', handler }]);
+    tools.setToolDefaults = rs.fn();
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['tap', '--deep-locate', '--locate', 'btn'],
+    });
+
+    expect(tools.setToolDefaults).toHaveBeenCalledWith({
+      locate: { deepLocate: true },
+      act: { deepLocate: true },
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it('does not set tool defaults without a behavior flag', async () => {
+    const handler = rs
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'tap', handler }]);
+    tools.setToolDefaults = rs.fn();
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['tap', '--locate', 'btn'],
+    });
+
+    expect(tools.setToolDefaults).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it('writes image tool results with an extension matching the mime type', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/jpeg' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'take_screenshot', handler }]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', { argv: ['take_screenshot'] });
+
+    const message = consoleSpy.mock.calls
+      .map(([line]) => String(line))
+      .find((line) => line.startsWith('Screenshot saved: '));
+    expect(message).toMatch(/^Screenshot saved: .+screenshot-\d+\.jpeg$/);
+    const screenshotPath = message?.replace('Screenshot saved: ', '');
+    expect(screenshotPath).toBeDefined();
+    expect(existsSync(screenshotPath!)).toBe(true);
+    expect(readFileSync(screenshotPath!, 'utf8')).toBe('hello');
+    consoleSpy.mockRestore();
+  });
+
+  it('strips a global --deep-think flag and applies act defaults', async () => {
+    const handler = rs
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'act', handler }]);
+    tools.setToolDefaults = rs.fn();
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--deep-think', 'act', '--prompt', 'open settings'],
+    });
+
+    expect(tools.setToolDefaults).toHaveBeenCalledWith({
+      act: { deepThink: true },
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it('merges defaults when both flags are present', async () => {
+    const handler = rs
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'act', handler }]);
+    tools.setToolDefaults = rs.fn();
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['act', '--deep-locate', '--deep-think', '--prompt', 'go'],
+    });
+
+    expect(tools.setToolDefaults).toHaveBeenCalledWith({
+      locate: { deepLocate: true },
+      act: { deepLocate: true, deepThink: true },
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  function createDetailedMockTools() {
+    return {
+      initTools: rs.fn().mockResolvedValue(undefined),
+      destroy: rs.fn().mockResolvedValue(undefined),
+      getToolDefinitions: rs.fn().mockReturnValue([
+        {
+          name: 'connect',
+          description: 'Connect to a device for automation',
+          schema: {
+            url: { description: 'The device URL to connect to' },
+            timeout: { description: 'Connection timeout in ms' },
+          },
+          handler: rs.fn(),
+        },
+        {
+          name: 'disconnect',
+          description: 'Disconnect from the current device',
+          schema: {},
+          handler: rs.fn(),
+        },
+        {
+          name: 'take_screenshot',
+          description: 'Capture a screenshot of the current screen',
+          schema: {
+            format: { description: 'Image format (png or jpg)' },
+          },
+          handler: rs.fn(),
+        },
+        {
+          name: 'tap',
+          description: 'Tap on a specific element or coordinate on the screen',
+          schema: {
+            locate: { description: 'Locator JSON to find the element' },
+            x: { description: 'X coordinate to tap' },
+            y: { description: 'Y coordinate to tap' },
+          },
+          handler: rs.fn(),
+        },
+      ]),
+    } as any;
+  }
+
+  it('--help output matches snapshot', async () => {
+    const tools = createDetailedMockTools();
+    const lines: string[] = [];
+    const consoleSpy = rs
+      .spyOn(console, 'log')
+      .mockImplementation((...args: any[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--help'],
+      version: '1.2.3',
+    });
+
+    expect(lines.join('\n')).toMatchSnapshot();
+    consoleSpy.mockRestore();
+  });
+
+  it('command --help output matches snapshot', async () => {
+    const tools = createDetailedMockTools();
+    const lines: string[] = [];
+    const consoleSpy = rs
+      .spyOn(console, 'log')
+      .mockImplementation((...args: any[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['connect', '--help'],
+    });
+
+    expect(lines.join('\n')).toMatchSnapshot();
+    consoleSpy.mockRestore();
+  });
+
+  it('prefers CLI display metadata for command help output', async () => {
+    const tools = {
+      initTools: rs.fn().mockResolvedValue(undefined),
+      destroy: rs.fn().mockResolvedValue(undefined),
+      getToolDefinitions: rs.fn().mockReturnValue([
+        {
+          name: 'android_connect',
+          description: 'Connect to Android device',
+          schema: {
+            'android.deviceId': {
+              description: 'Android device ID (from adb devices)',
+            },
+          },
+          cli: {
+            options: {
+              'android.deviceId': {
+                preferredName: 'device-id',
+                aliases: ['deviceId'],
+              },
+            },
+          },
+          handler: rs.fn(),
+        },
+      ]),
+    } as any;
+    const lines: string[] = [];
+    const consoleSpy = rs
+      .spyOn(console, 'log')
+      .mockImplementation((...args: any[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+
+    await runToolsCLI(tools, 'midscene-android', {
+      stripPrefix: 'android_',
+      argv: ['connect', '--help'],
+    });
+
+    expect(lines.join('\n')).toContain('--device-id');
+    expect(lines.join('\n')).toContain('(aliases: --deviceId)');
+    expect(lines.join('\n')).not.toContain('--android.device-id');
+    consoleSpy.mockRestore();
+  });
+
+  it('rejects disallowed dotted init-arg spellings via CLI schema', async () => {
+    const tools = {
+      initTools: rs.fn().mockResolvedValue(undefined),
+      destroy: rs.fn().mockResolvedValue(undefined),
+      getToolDefinitions: rs.fn().mockReturnValue([
+        {
+          name: 'android_connect',
+          description: 'Connect to Android device',
+          schema: {
+            'android.deviceId': {
+              description: 'Android device ID (from adb devices)',
+            },
+          },
+          cli: {
+            options: {
+              'android.deviceId': {
+                preferredName: 'device-id',
+                aliases: ['deviceId'],
+              },
+            },
+          },
+          handler: rs.fn(),
+        },
+      ]),
+    } as any;
+
+    await expect(
+      runToolsCLI(tools, 'midscene-android', {
+        stripPrefix: 'android_',
+        argv: ['connect', '--android.deviceId', 'emulator-5554'],
+      }),
+    ).rejects.toThrow(
+      'Unsupported option "--android.deviceId" for midscene-android connect.',
+    );
+  });
+
+  it('throws CLIError for unknown command', async () => {
+    const tools = createMockTools([
+      {
+        name: 'connect',
+        handler: async () => ({ content: [], isError: false }),
+      },
+    ]);
+    rs.spyOn(console, 'error').mockImplementation(() => {});
+    rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(
+      runToolsCLI(tools, 'test-cli', { argv: ['unknown'] }),
+    ).rejects.toThrow(CLIError);
+
+    rs.restoreAllMocks();
+  });
+
+  it('executes matched command with parsed args', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Connected' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'test_connect', handler }]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      stripPrefix: 'test_',
+      argv: ['connect', '--url', 'https://example.com'],
+    });
+
+    expect(handler).toHaveBeenCalledWith({ url: 'https://example.com' });
+    expect(consoleSpy).toHaveBeenCalledWith('Connected');
+    consoleSpy.mockRestore();
+  });
+
+  it('maps leading command positionals into handler arguments', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Recording started' }],
+      isError: false,
+    });
+    const tools = {
+      ...createMockTools([]),
+      getCliToolDefinitions: rs.fn().mockReturnValue([
+        {
+          name: 'record',
+          description: 'record command',
+          schema: {
+            action: z.literal('start'),
+            output: z.string().optional(),
+          },
+          cli: { positionals: ['action'] },
+          handler,
+        },
+      ]),
+    } as any;
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['record', 'start', '--output', 'toast.json'],
+    });
+
+    expect(handler).toHaveBeenCalledWith({
+      action: 'start',
+      output: 'toast.json',
+    });
+    consoleSpy.mockRestore();
+  });
+
+  it('strips global --verbose and emits readable progress lines', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Connected' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'connect', handler }]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--verbose', 'connect', '--url', 'https://example.com'],
+    });
+
+    expect(handler).toHaveBeenCalledWith({ url: 'https://example.com' });
+    const messages = consoleSpy.mock.calls.map(([message]) => String(message));
+    expect(messages).toEqual([
+      '[Midscene] connect started (url=https://example.com)',
+      'Connected',
+      expect.stringMatching(/^\[Midscene\] connect finished in \d+ms$/),
+    ]);
+    consoleSpy.mockRestore();
+  });
+
+  it('emits readable progress for record without an explicit verbose flag', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Observation passed' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'record', handler }]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['record', '--output', 'toast.json'],
+    });
+
+    const messages = consoleSpy.mock.calls.map(([message]) => String(message));
+    expect(messages).toEqual([
+      '[Midscene] record started (output=toast.json)',
+      'Observation passed',
+      expect.stringMatching(/^\[Midscene\] record finished in \d+ms$/),
+    ]);
+    consoleSpy.mockRestore();
+  });
+
+  it('preserves structured command args in jsonl verbose progress events', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Tapped' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'tap', handler }]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: [
+        '--verbose=jsonl',
+        'tap',
+        '--locate',
+        '{"prompt":"Submit","deepLocate":true}',
+      ],
+    });
+
+    const progressEvents = consoleSpy.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes('"type":"midscene_progress"'))
+      .map((message) => JSON.parse(message));
+    expect(progressEvents[0]).toMatchObject({
+      event: 'command_start',
+      type: 'midscene_progress',
+      scriptName: 'test-cli',
+      command: 'tap',
+      args: {
+        locate: {
+          prompt: 'Submit',
+          deepLocate: true,
+        },
+      },
+    });
+    consoleSpy.mockRestore();
+  });
+
+  it('strips platform prefix from command names', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'android_disconnect', handler }]);
+    rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      stripPrefix: 'android_',
+      argv: ['disconnect'],
+    });
+
+    expect(handler).toHaveBeenCalledWith({});
+    rs.restoreAllMocks();
+  });
+
+  it('calls destroy after successful command', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'done' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'connect', handler }]);
+    rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', { argv: ['connect'] });
+
+    expect(tools.destroy).toHaveBeenCalledOnce();
+    rs.restoreAllMocks();
+  });
+
+  it('calls destroy before throwing on command error', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Something went wrong' }],
+      isError: true,
+    });
+    const tools = createMockTools([{ name: 'fail_cmd', handler }]);
+    rs.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      runToolsCLI(tools, 'test-cli', {
+        stripPrefix: '',
+        argv: ['fail_cmd'],
+      }),
+    ).rejects.toThrow(CLIError);
+
+    expect(tools.destroy).toHaveBeenCalledOnce();
+    rs.restoreAllMocks();
+  });
+
+  it('calls destroy when a command handler throws', async () => {
+    const handler = rs.fn().mockRejectedValue(new Error('boom'));
+    const tools = createMockTools([{ name: 'explode', handler }]);
+    rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(
+      runToolsCLI(tools, 'test-cli', {
+        argv: ['--verbose', 'explode'],
+      }),
+    ).rejects.toThrow('boom');
+
+    expect(tools.destroy).toHaveBeenCalledOnce();
+    rs.restoreAllMocks();
+  });
+
+  it('emits an aiAct failure line when an act command throws by default', async () => {
+    const handler = rs.fn().mockRejectedValue(new Error('boom'));
+    const tools = createMockTools([{ name: 'act', handler }]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(
+      runToolsCLI(tools, 'test-cli', {
+        argv: ['act'],
+      }),
+    ).rejects.toThrow('boom');
+
+    const messages = consoleSpy.mock.calls.map(([message]) => String(message));
+    expect(messages).toContain('[Midscene][aiAct] Failed: boom');
+    expect(tools.destroy).toHaveBeenCalledOnce();
+    rs.restoreAllMocks();
+  });
+
+  it('matches commands case-insensitively', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'tapped' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'Tap', handler }]);
+    rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    // Uppercase tool name should match lowercase user input
+    await runToolsCLI(tools, 'test-cli', { argv: ['tap'] });
+    expect(handler).toHaveBeenCalled();
+
+    handler.mockClear();
+
+    // Also works with original casing
+    await runToolsCLI(tools, 'test-cli', { argv: ['Tap'] });
+    expect(handler).toHaveBeenCalled();
+
+    rs.restoreAllMocks();
+  });
+
+  it('displays command names as lowercase in help', async () => {
+    const tools = createMockTools([
+      {
+        name: 'Tap',
+        handler: rs.fn().mockResolvedValue({ content: [], isError: false }),
+      },
+      {
+        name: 'Scroll',
+        handler: rs.fn().mockResolvedValue({ content: [], isError: false }),
+      },
+    ]);
+    const lines: string[] = [];
+    rs.spyOn(console, 'log').mockImplementation((...args: any[]) => {
+      lines.push(args.map(String).join(' '));
+    });
+
+    await runToolsCLI(tools, 'test-cli', { argv: ['--help'] });
+
+    const output = lines.join('\n');
+    // Command names should be lowercase
+    expect(output).toContain('  tap');
+    expect(output).toContain('  scroll');
+    // Command names column should not have uppercase originals
+    const commandLines = output
+      .split('\n')
+      .slice(
+        output.split('\n').indexOf('Commands:') + 1,
+        output.split('\n').indexOf('Global Options:'),
+      )
+      .filter((l) => l.startsWith('  '));
+    for (const line of commandLines) {
+      const cmdName = line.trimStart().split(/\s{2,}/)[0];
+      expect(cmdName).toBe(cmdName.toLowerCase());
+    }
+
+    rs.restoreAllMocks();
+  });
+
+  it('shows command help with --help after command name', async () => {
+    const handler = rs.fn();
+    const tools = createMockTools([{ name: 'connect', handler }]);
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['connect', '--help'],
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it('shows foreground record help without session or end plumbing', async () => {
+    const tools = {
+      initTools: rs.fn().mockResolvedValue(undefined),
+      destroy: rs.fn().mockResolvedValue(undefined),
+      getToolDefinitions: rs.fn().mockReturnValue([]),
+      getCliToolDefinitions: rs.fn().mockReturnValue([
+        {
+          name: 'record',
+          description: 'record command',
+          schema: {
+            action: z.literal('start'),
+            output: z.string().optional(),
+          },
+          cli: { positionals: ['action'] },
+          handler: rs.fn(),
+        },
+      ]),
+    } as any;
+    const lines: string[] = [];
+    const consoleSpy = rs
+      .spyOn(console, 'log')
+      .mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['record', '--help'],
+    });
+
+    const output = lines.join('\n');
+    expect(output).toContain('Usage: test-cli record <action> [options]');
+    expect(output).toContain('--output');
+    expect(output).not.toContain('--session');
+    expect(output).toContain('Global Options:');
+    consoleSpy.mockRestore();
+  });
+
+  it('supports shared extra commands', async () => {
+    const tools = createMockTools([]);
+    const extraHandler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'split done' }],
+      isError: false,
+    });
+    const consoleSpy = rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: [
+        'report-tool',
+        '--action',
+        'split',
+        '--htmlPath',
+        './in.html',
+        '--outputDir',
+        './out',
+      ],
+      extraCommands: [
+        {
+          name: 'report-tool',
+          def: {
+            name: 'report-tool',
+            description: 'report tools',
+            schema: {},
+            handler: extraHandler,
+          },
+        },
+      ],
+    });
+
+    expect(extraHandler).toHaveBeenCalledWith({
+      htmlPath: './in.html',
+      outputDir: './out',
+      action: 'split',
+    });
+    expect(consoleSpy).toHaveBeenCalledWith('split done');
+    consoleSpy.mockRestore();
+  });
+
+  it('canonicalizes kebab-case spellings to schema keys before dispatch', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false,
+    });
+    const tools = {
+      initTools: rs.fn().mockResolvedValue(undefined),
+      destroy: rs.fn().mockResolvedValue(undefined),
+      getToolDefinitions: rs.fn().mockReturnValue([
+        {
+          name: 'assert',
+          description: 'assert',
+          schema: {
+            prompt: z.string(),
+            imageName: z.union([z.string(), z.array(z.string())]).optional(),
+          },
+          handler,
+        },
+      ]),
+    } as any;
+    rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: [
+        'assert',
+        '--prompt',
+        'p',
+        '--image-name',
+        'a',
+        '--image-name',
+        'b',
+      ],
+    });
+
+    expect(handler).toHaveBeenCalledWith({
+      prompt: 'p',
+      imageName: ['a', 'b'],
+    });
+    rs.restoreAllMocks();
+  });
+
+  it('canonicalizes aliases while preserving numeric-looking strings', async () => {
+    const handler = rs.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false,
+    });
+    const tools = {
+      initTools: rs.fn().mockResolvedValue(undefined),
+      destroy: rs.fn().mockResolvedValue(undefined),
+      getToolDefinitions: rs.fn().mockReturnValue([
+        {
+          name: 'android_connect',
+          description: 'connect',
+          schema: { 'android.deviceId': z.string().optional() },
+          cli: {
+            options: {
+              'android.deviceId': {
+                preferredName: 'device-id',
+                aliases: ['deviceId'],
+              },
+            },
+          },
+          handler,
+        },
+      ]),
+    } as any;
+    rs.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'midscene-android', {
+      stripPrefix: 'android_',
+      argv: ['connect', '--deviceId', '320336557157'],
+    });
+
+    expect(handler).toHaveBeenCalledWith({
+      'android.deviceId': '320336557157',
+    });
+    rs.restoreAllMocks();
+  });
+
+  it('throws CLIError when the same field is set under conflicting spellings', async () => {
+    const handler = rs.fn();
+    const tools = {
+      initTools: rs.fn().mockResolvedValue(undefined),
+      destroy: rs.fn().mockResolvedValue(undefined),
+      getToolDefinitions: rs.fn().mockReturnValue([
+        {
+          name: 'assert',
+          description: 'assert',
+          schema: {
+            prompt: z.string(),
+            imageName: z.string().optional(),
+          },
+          handler,
+        },
+      ]),
+    } as any;
+    rs.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      runToolsCLI(tools, 'test-cli', {
+        argv: [
+          'assert',
+          '--prompt',
+          'p',
+          '--imageName',
+          'camel',
+          '--image-name',
+          'kebab',
+        ],
+      }),
+    ).rejects.toThrow(/Conflicting CLI options.*image-name/);
+    expect(handler).not.toHaveBeenCalled();
+    rs.restoreAllMocks();
+  });
+});
