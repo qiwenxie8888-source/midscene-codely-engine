@@ -103,7 +103,11 @@ export async function prepareTestRun(
         input.projectRoot,
         runDir,
         definition.test.testTimeout,
-        input.singleFile ? { files: [input.singleFile] } : undefined,
+        input.singleFile
+          ? { files: [input.singleFile] }
+          : options.only && options.only.length > 0
+            ? { only: options.only }
+            : undefined,
       ),
     );
   const hasFormatMismatch = projects.some((project) =>

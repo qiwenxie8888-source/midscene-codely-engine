@@ -16,6 +16,8 @@ export interface TestProjectRunOptions {
   configPath?: string;
   resultDir?: string;
   projectNames?: readonly string[];
+  /** 只跑路径以这些前缀开头的用例文件（相对 projectRoot，可重复） */
+  only?: readonly string[];
   onProgress?(message: string): void;
 }
 
@@ -37,6 +39,8 @@ export interface PreparedDocumentInvocation {
 
 export interface ProjectPreparationOptions {
   files?: readonly string[];
+  /** 只保留路径以这些前缀开头的文件（相对 projectRoot） */
+  only?: readonly string[];
   prerequisiteFile?: string;
   documentConcurrency?: number;
   platform?: string;

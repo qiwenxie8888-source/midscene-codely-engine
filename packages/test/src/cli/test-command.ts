@@ -25,6 +25,7 @@ interface ParsedTestArgs {
   configPath?: string;
   resultDir?: string;
   projectNames?: string[];
+  only?: string[];
 }
 
 export const parseTestCliArgs = (
@@ -37,6 +38,7 @@ export const parseTestCliArgs = (
   let configPath: string | undefined;
   let resultDir: string | undefined;
   const projectNames: string[] = [];
+  const onlyPrefixes: string[] = [];
 
   for (let index = commandOffset; index < args.length; index += 1) {
     const token = args[index];
@@ -49,12 +51,18 @@ export const parseTestCliArgs = (
       projectRoot = resolve(cwd, arg);
       continue;
     }
-    if (arg === '--config' || arg === '--result-dir' || arg === '--project') {
+    if (
+      arg === '--config' ||
+      arg === '--result-dir' ||
+      arg === '--project' ||
+      arg === '--only'
+    ) {
       const value = inlineValue ?? args[index + 1];
       if (!value || value.startsWith('--'))
         throw new Error(`${arg} requires a value.`);
       if (arg === '--config') configPath = value;
       else if (arg === '--result-dir') resultDir = resolve(cwd, value);
+      else if (arg === '--only') onlyPrefixes.push(value);
       else projectNames.push(value);
       if (inlineValue === undefined) index += 1;
     } else {
@@ -75,6 +83,7 @@ export const parseTestCliArgs = (
     configPath,
     resultDir,
     ...(projectNames.length > 0 ? { projectNames } : {}),
+    ...(onlyPrefixes.length > 0 ? { only: onlyPrefixes } : {}),
   };
 };
 
@@ -96,6 +105,7 @@ Usage:
 Options:
   --config <path>              Native TypeScript or JavaScript Test config
   --project <name>             Select a native execution Project (repeatable)
+  --only <path>                Only run case files under this path (repeatable)
   --result-dir <path>          Store Test result files in this directory
   --help, -h                  Show this help
   --version                   Show the package version

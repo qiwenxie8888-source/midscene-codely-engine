@@ -163,6 +163,37 @@ export const selectProjects = <TProjectContext>(
   return projects.filter((project) => requested.has(project.name));
 };
 
+/**
+ * 按路径前缀筛选用例文件（`--only`）。
+ *
+ * 前缀相对 projectRoot，比较时统一成正斜杠；前缀为空表示不过滤。
+ * 过滤后为空直接报错，避免"跑完了但其实一条都没跑"。
+ */
+const applyOnlyFilter = (
+  files: readonly string[],
+  projectRoot: string,
+  only: readonly string[] | undefined,
+): readonly string[] => {
+  if (!only || only.length === 0) return files;
+  const root = resolve(projectRoot);
+  const prefixes = only
+    .map((item) => toPosix(item.trim()).replace(/^\.\//, '').replace(/\/+$/, ''))
+    .filter(Boolean);
+  if (prefixes.length === 0) return files;
+
+  const filtered = files.filter((file) => {
+    const rel = toPosix(relative(root, file));
+    return prefixes.some((prefix) => rel === prefix || rel.startsWith(`${prefix}/`));
+  });
+
+  if (filtered.length === 0) {
+    throw new Error(
+      `--only 没有匹配到任何用例文件：${prefixes.join(', ')}（相对 ${root}）`,
+    );
+  }
+  return filtered;
+};
+
 /** Prepare and validate every document before any Project resource is acquired. */
 export async function prepareProject(
   project: LoadedExecutionProject,
@@ -176,8 +207,11 @@ export async function prepareProject(
   const prerequisiteFile = options.prerequisiteFile
     ? resolve(options.prerequisiteFile)
     : undefined;
-  const mainFiles =
-    options.files ?? discoverResolvedTestFiles(projectRoot, fileSelection);
+  const mainFiles = applyOnlyFilter(
+    options.files ?? discoverResolvedTestFiles(projectRoot, fileSelection),
+    projectRoot,
+    options.only,
+  );
   const files = [
     ...(prerequisiteFile ? [prerequisiteFile] : []),
     ...mainFiles.filter((file) => file !== prerequisiteFile),
